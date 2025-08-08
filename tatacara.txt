@@ -1,0 +1,14 @@
+# Inisialisasi Git di folder Anda
+git init -b main
+
+# Tambahkan semua file untuk di-upload
+git add .
+
+# Buat "snapshot" dari kode Anda
+git commit -m "Initial server for deployment"
+
+# Hubungkan folder lokal Anda ke repository GitHub
+git remote add origin [URL_GITHUB_ANDA]
+
+# Kirim (upload) kode Anda ke GitHub
+git push -u origin main
