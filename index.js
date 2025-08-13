@@ -17,14 +17,14 @@ const games = {};
 let matchmakingTimer = null;
 
 // --- KONSTANTA GAME SEPAK BOLA (Disesuaikan untuk 1v1) ---
-const ARENA_WIDTH = 1000;   // PERUBAHAN: Dibuat lebih sempit agar pas untuk 1v1
-const ARENA_HEIGHT = 600;  // PERUBAHAN: Dibuat sedikit lebih pendek
-const BALL_RADIUS = 20;
+const ARENA_WIDTH = 1000;
+const ARENA_HEIGHT = 600;
+const BALL_RADIUS = 30; // Bola lebih besar
 const PLAYER_RADIUS = 30;
 const MAX_PLAYER_SPEED = 250;
 const SLIDE_SPEED = 800;
 const SLIDE_DURATION = 250; // ms
-const MATCHMAKING_TIMEOUT = 5000; // PERUBAHAN: Waktu tunggu 5 detik
+const MATCHMAKING_TIMEOUT = 5000;
 
 // --- FUNGSI MATCHMAKING ---
 function startMatchmakingTimer() {
@@ -47,7 +47,6 @@ function tryStartGame() {
 
     if (waitingPlayers.length === 0) return;
 
-    // PERUBAHAN: Logika untuk 1v1 (minimal 1 pemain untuk mulai dengan bot)
     if (waitingPlayers.length === 1) {
         console.log("Hanya 1 pemain, menambahkan 1 bot...");
         const botId = `bot_${Date.now()}`;
@@ -57,7 +56,6 @@ function tryStartGame() {
     const player1 = waitingPlayers[0];
     const player2 = waitingPlayers[1];
     
-    // PERUBAHAN: Ambil socket yang aktif saja
     const playerSockets = waitingPlayers.map(p => p.socket).filter(Boolean);
 
     const teamA_Ids = [player1.id];
@@ -77,16 +75,17 @@ function tryStartGame() {
         lastUpdate: Date.now(),
     };
 
-    // PERUBAHAN: Atur posisi awal pemain untuk 1v1
     const setupPlayer = (id, team, isBot) => {
         const isTeamA = team === 'teamA';
         gameState.players[id] = {
             id,
             team,
             isBot: isBot || false,
-            x: ARENA_WIDTH / 2, // Posisi X di tengah
-            y: isTeamA ? ARENA_HEIGHT * 0.75 : ARENA_HEIGHT * 0.25, // Posisi Y di area masing-masing
+            x: ARENA_WIDTH / 2,
+            y: isTeamA ? ARENA_HEIGHT * 0.75 : ARENA_HEIGHT * 0.25,
             vx: 0, vy: 0,
+            lastVx: 0,
+            lastVy: isTeamA ? -1 : 1, // Default menghadap gawang lawan
             isSliding: false,
             slideTimer: 0,
         };
@@ -99,12 +98,11 @@ function tryStartGame() {
     
     playerSockets.forEach(socket => {
         socket.join(roomId);
-        // Kirim state game ke setiap pemain, termasuk ID mereka sendiri
         io.to(socket.id).emit("matchFound", { ...gameState, myId: socket.id });
     });
 
     console.log(`Game 1v1 dimulai di room ${roomId} dengan tim:`, teamA_Ids, "vs", teamB_Ids);
-    waitingPlayers = []; // Kosongkan antrean
+    waitingPlayers = [];
 }
 
 io.on("connection", (socket) => {
@@ -117,11 +115,9 @@ io.on("connection", (socket) => {
         waitingPlayers.push({ id: socket.id, socket });
         socket.emit("statusUpdate", { status: 'waiting' });
 
-        // PERUBAHAN: Mulai game jika sudah ada 2 pemain
         if (waitingPlayers.length >= 2) {
             tryStartGame();
         } else {
-            // Jika ini pemain pertama, mulai timer
             startMatchmakingTimer();
         }
     });
@@ -130,7 +126,7 @@ io.on("connection", (socket) => {
         const game = games[roomId];
         if (!game || !game.players[socket.id]) return;
         const player = game.players[socket.id];
-        if (player.isBot) return; // Bot tidak dikontrol dari client
+        if (player.isBot) return;
         player.vx = vx;
         player.vy = vy;
     });
@@ -144,18 +140,17 @@ io.on("connection", (socket) => {
        if (action === 'slide' && !player.isSliding) {
            player.isSliding = true;
            player.slideTimer = SLIDE_DURATION;
+
        } else if (action === 'shoot' && game.ball.possessedBy === socket.id) {
-           const { ball } = game;
+           const { ball, players } = game;
+           const player = players[socket.id];
            ball.possessedBy = null;
-           const shootStrength = 150 + (charge * 1000);
-           
-           let shootDirX = player.vx;
-           let shootDirY = player.vy;
-           
-           if (shootDirX === 0 && shootDirY === 0) {
-               const playerTeam = player.team;
-               shootDirY = playerTeam === 'teamA' ? -1 : 1; // Tembak ke gawang lawan
-           }
+
+           let finalCharge = charge > 1.0 ? 0.1 : charge;
+           const shootStrength = 300 + (finalCharge * 1200);
+
+           let shootDirX = player.lastVx;
+           let shootDirY = player.lastVy;
 
            const magnitude = Math.sqrt(shootDirX**2 + shootDirY**2) || 1;
            ball.vx = (shootDirX / magnitude) * shootStrength;
@@ -164,42 +159,37 @@ io.on("connection", (socket) => {
     });
 
     socket.on("disconnecting", () => {
-        // Hapus pemain dari antrean jika ada
         const playerIndex = waitingPlayers.findIndex(p => p.id === socket.id);
         if (playerIndex !== -1) {
             waitingPlayers.splice(playerIndex, 1);
             console.log(`Pemain ${socket.id} keluar dari antrean.`);
         }
         
-        // Jika antrean menjadi kosong, hentikan timer
         if (waitingPlayers.length === 0) {
             stopMatchmakingTimer();
         }
 
-        // Hentikan game jika salah satu pemain keluar
         for (const roomId of socket.rooms) {
             if (roomId !== socket.id && games[roomId]) {
                 console.log(`Pemain ${socket.id} keluar dari room ${roomId}. Game dihentikan.`);
                 io.to(roomId).emit("statusUpdate", { status: 'opponentLeft', data: { playerId: socket.id } });
-                delete games[roomId]; // Hapus game state
+                delete games[roomId];
             }
         }
     });
 });
 
-// --- GAME LOOP (Tidak ada perubahan signifikan di sini) ---
+// --- GAME LOOP ---
 function gameLoop() {
     const now = Date.now();
     for (const roomId in games) {
         const game = games[roomId];
         const dt = (now - game.lastUpdate) / 1000;
 
-        // Update semua pemain
         for (const playerId in game.players) {
             updatePlayer(game.players[playerId], game, dt);
         }
 
-        // Update bola
         updateBall(game.ball, game, dt);
 
         game.lastUpdate = now;
@@ -208,25 +198,26 @@ function gameLoop() {
 }
 
 function updatePlayer(player, game, dt) {
-    // --- CONTOH LOGIKA BOT SEDERHANA ---
     if (player.isBot) {
         const ball = game.ball;
-        // Arahkan bot ke bola
         const dirX = ball.x - player.x;
         const dirY = ball.y - player.y;
         const magnitude = Math.sqrt(dirX**2 + dirY**2) || 1;
         player.vx = dirX / magnitude;
         player.vy = dirY / magnitude;
 
-        // Jika bot dekat dengan bola dan menguasainya, coba tembak
         if (game.ball.possessedBy === player.id) {
-            // Tembak lurus ke gawang lawan (Team A di bawah, Team B di atas)
             const shootDirY = player.team === 'teamA' ? -1 : 1;
-            const shootStrength = 300; // Kekuatan tembakan bot
+            const shootStrength = 300;
             ball.vx = 0;
             ball.vy = shootDirY * shootStrength;
             ball.possessedBy = null;
         }
+    }
+    
+    if (player.vx !== 0 || player.vy !== 0) {
+        player.lastVx = player.vx;
+        player.lastVy = player.vy;
     }
     
     if (player.isSliding) {
@@ -234,11 +225,13 @@ function updatePlayer(player, game, dt) {
         if (player.slideTimer <= 0) {
             player.isSliding = false;
         }
+        player.x += player.lastVx * SLIDE_SPEED * dt;
+        player.y += player.lastVy * SLIDE_SPEED * dt;
+
+    } else {
+        player.x += player.vx * MAX_PLAYER_SPEED * dt;
+        player.y += player.vy * MAX_PLAYER_SPEED * dt;
     }
-    
-    const speed = player.isSliding ? SLIDE_SPEED : MAX_PLAYER_SPEED;
-    player.x += player.vx * speed * dt;
-    player.y += player.vy * speed * dt;
 
     player.x = Math.max(PLAYER_RADIUS, Math.min(ARENA_WIDTH - PLAYER_RADIUS, player.x));
     player.y = Math.max(PLAYER_RADIUS, Math.min(ARENA_HEIGHT - PLAYER_RADIUS, player.y));
@@ -251,7 +244,7 @@ function updateBall(ball, game, dt) {
             const team = owner.team;
             const forwardY = team === 'teamA' ? -1 : 1;
             ball.x = owner.x;
-            ball.y = owner.y + (forwardY * (PLAYER_RADIUS + 5)); // Bola di depan pemain
+            ball.y = owner.y + (forwardY * (PLAYER_RADIUS + 5));
             ball.vx = 0;
             ball.vy = 0;
         } else {
@@ -260,12 +253,15 @@ function updateBall(ball, game, dt) {
     } else {
         ball.x += ball.vx * dt;
         ball.y += ball.vy * dt;
-        ball.vx *= 0.98; // Gesekan
+        ball.vx *= 0.98;
         ball.vy *= 0.98;
 
         if (ball.x <= BALL_RADIUS || ball.x >= ARENA_WIDTH - BALL_RADIUS) ball.vx *= -0.9;
         if (ball.y <= BALL_RADIUS || ball.y >= ARENA_HEIGHT - BALL_RADIUS) ball.vy *= -0.9;
         
+        let playerWithBall = null;
+        let closestDist = Infinity;
+
         for (const playerId in game.players) {
             const player = game.players[playerId];
             const dx = ball.x - player.x;
@@ -273,30 +269,32 @@ function updateBall(ball, game, dt) {
             const dist = Math.sqrt(dx*dx + dy*dy);
 
             if (dist < PLAYER_RADIUS + BALL_RADIUS) {
-                 if (player.isSliding && game.ball.possessedBy !== null) {
-                     // Pemain yang slide bisa merebut bola dari lawan
-                     ball.possessedBy = playerId;
-                 } else if(game.ball.possessedBy === null) {
-                     // Kuasai bola jika tidak ada yang punya
-                     ball.possessedBy = playerId;
-                 }
+                if (player.isSliding) {
+                    playerWithBall = player;
+                    break;
+                }
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    playerWithBall = player;
+                }
             }
+        }
+
+        if (playerWithBall) {
+            ball.possessedBy = playerWithBall.id;
         }
     }
     
-    // Cek Goal
-    const goalPostWidth = ARENA_WIDTH * 0.4; // Lebar gawang
+    const goalPostWidth = ARENA_WIDTH * 0.4;
     const goalLeftX = (ARENA_WIDTH - goalPostWidth) / 2;
     const goalRightX = goalLeftX + goalPostWidth;
 
     let scorerTeam = null;
-    // Gawang atas (milik Team B, gol untuk Team A)
     if (ball.y < BALL_RADIUS) {
         if (ball.x > goalLeftX && ball.x < goalRightX) {
             scorerTeam = 'teamA';
         }
     } 
-    // Gawang bawah (milik Team A, gol untuk Team B)
     else if (ball.y > ARENA_HEIGHT - BALL_RADIUS) {
          if (ball.x > goalLeftX && ball.x < goalRightX) {
             scorerTeam = 'teamB';
@@ -306,7 +304,6 @@ function updateBall(ball, game, dt) {
     if (scorerTeam) {
         game.teams[scorerTeam].score++;
         console.log(`GOAL! for ${scorerTeam}. Score: A=${game.teams.teamA.score}, B=${game.teams.teamB.score}`);
-        // Reset posisi
         ball.x = ARENA_WIDTH / 2;
         ball.y = ARENA_HEIGHT / 2;
         ball.vx = 0;
@@ -314,7 +311,6 @@ function updateBall(ball, game, dt) {
         ball.possessedBy = null;
     }
 }
-
 
 setInterval(gameLoop, 1000 / 60);
 server.listen(PORT, () => console.log(`Server sepak bola 1v1 berjalan di port ${PORT}`));
