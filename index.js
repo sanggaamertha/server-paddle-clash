@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,333 +11,270 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-let waitingPlayer = null;
+// --- STATE MANAGEMENT ---
+let waitingPlayers = [];
 const games = {};
+let matchmakingTimer = null;
 
-// --- KONSTANTA BARU ---
-const WINNING_SCORE = 10;
-const COUNTDOWN_SECONDS = 3; // Termasuk angka 3, 2, 1
+// --- KONSTANTA GAME SEPAK BOLA ---
+const ARENA_WIDTH = 500;
+const ARENA_HEIGHT = 1000;
+const BALL_RADIUS = 20;
+const PLAYER_RADIUS = 30;
+const MAX_PLAYER_SPEED = 250;
+const SLIDE_SPEED = 800;
+const SLIDE_DURATION = 250; // ms
+const MATCHMAKING_TIMEOUT = 10000; // 10 detik
 
-// --- KONSTANTA FISIKA (tetap sama) ---
-const ARENA_WIDTH = 400;
-const ARENA_HEIGHT = 800;
-const PUCK_RADIUS = 22;
-const PADDLE_RADIUS = 85 / 2;
-const AIR_FRICTION = 0.992;
-const MAX_SPEED = 1600;
-const WALL_ENERGY_TRANSFER = 0.94;
-const PADDLE_ENERGY_TRANSFER = 1.1;
-
-// Fungsi untuk memulai timer bot
-function startBotMatchTimer(socket) {
-  const delay = Math.random() * (19000 - 10000) + 10000; // Random 10-19 detik
-  console.log(
-    `Pemain ${socket.id} menunggu. Timer bot diatur untuk ${Math.round(
-      delay / 1000
-    )} detik.`
-  );
-
-  const timer = setTimeout(() => {
-    // Cek jika pemain masih menunggu
-    if (waitingPlayer && waitingPlayer.socket.id === socket.id) {
-      console.log(`Waktu tunggu habis! Mencarikan bot untuk ${socket.id}.`);
-      matchWithBot(socket);
-    }
-  }, delay);
-
-  waitingPlayer = { socket: socket, timer: timer };
+// --- FUNGSI MATCHMAKING ---
+function startMatchmakingTimer() {
+    if (matchmakingTimer) return; // Timer sudah berjalan
+    console.log(`Matchmaking timer dimulai (${MATCHMAKING_TIMEOUT / 1000}s)`);
+    matchmakingTimer = setTimeout(tryStartGame, MATCHMAKING_TIMEOUT);
 }
 
-// Fungsi untuk membuat game melawan bot
-function matchWithBot(playerSocket) {
-  const botId = `bot_${playerSocket.id}`;
-  const roomId = `game_bot_${playerSocket.id}`;
+function stopMatchmakingTimer() {
+    if (matchmakingTimer) {
+        clearTimeout(matchmakingTimer);
+        matchmakingTimer = null;
+        console.log("Matchmaking timer dihentikan.");
+    }
+}
 
-  playerSocket.join(roomId);
+function tryStartGame() {
+    stopMatchmakingTimer();
+    console.log(`Mencoba memulai game dengan ${waitingPlayers.length} pemain.`);
 
-  games[roomId] = {
-    roomId: roomId,
-    isBotGame: true, // Tandai ini sebagai game bot
-    players: {
-      [playerSocket.id]: {
-        isPlayer1: true,
-        paddleX: 200,
-        paddleY: 700,
-        paddleVX: 0,
-        paddleVY: 0,
-      },
-      [botId]: {
-        isPlayer1: false,
-        paddleX: 200,
-        paddleY: 100,
-        paddleVX: 0,
-        paddleVY: 0,
-        isBot: true,
-      },
-    },
-    puck: { x: 200, y: 400, vx: 0, vy: 0, isFrozen: true }, // Mulai dengan bola beku
-    score: { [playerSocket.id]: 0, [botId]: 0 },
-    countdown: COUNTDOWN_SECONDS,
-  };
+    if (waitingPlayers.length === 0) return;
 
-  io.to(roomId).emit("matchFound", games[roomId]);
-  waitingPlayer = null; // Hapus dari antrian
+    const playersNeeded = 4;
+    const botsToAdd = playersNeeded - waitingPlayers.length;
+
+    for (let i = 0; i < botsToAdd; i++) {
+        const botId = `bot_${Date.now()}_${i}`;
+        waitingPlayers.push({ id: botId, isBot: true });
+    }
+
+    // Acak pemain untuk membuat tim
+    waitingPlayers.sort(() => Math.random() - 0.5);
+
+    const playerSockets = waitingPlayers.map(p => p.socket).filter(Boolean); // Hanya socket pemain manusia
+
+    const teamA_Ids = [waitingPlayers[0].id, waitingPlayers[1].id];
+    const teamB_Ids = [waitingPlayers[2].id, waitingPlayers[3].id];
+    
+    const roomId = `game_${Date.now()}`;
+
+    const gameState = {
+        roomId,
+        arena: { width: ARENA_WIDTH, height: ARENA_HEIGHT },
+        teams: {
+            teamA: { score: 0, playerIds: teamA_Ids },
+            teamB: { score: 0, playerIds: teamB_Ids }
+        },
+        players: {},
+        ball: { x: ARENA_WIDTH / 2, y: ARENA_HEIGHT / 2, vx: 0, vy: 0, possessedBy: null },
+        lastUpdate: Date.now(),
+    };
+
+    // Atur posisi awal pemain
+    const setupPlayer = (id, team, isBot, index) => {
+        const isTeamA = team === 'teamA';
+        gameState.players[id] = {
+            id,
+            team,
+            isBot: isBot || false,
+            x: isTeamA ? (ARENA_WIDTH / 4) * (index === 0 ? 1 : 3) : (ARENA_WIDTH / 4) * (index === 0 ? 1 : 3),
+            y: isTeamA ? ARENA_HEIGHT * 0.75 : ARENA_HEIGHT * 0.25,
+            vx: 0, vy: 0,
+            isSliding: false,
+            slideTimer: 0,
+        };
+    };
+
+    waitingPlayers.slice(0, 2).forEach((p, i) => setupPlayer(p.id, 'teamA', p.isBot, i));
+    waitingPlayers.slice(2, 4).forEach((p, i) => setupPlayer(p.id, 'teamB', p.isBot, i));
+
+    games[roomId] = gameState;
+    
+    // Beri tahu semua pemain manusia bahwa match ditemukan
+    playerSockets.forEach(socket => {
+        socket.join(roomId);
+        io.to(socket.id).emit("matchFound", { ...gameState, myId: socket.id });
+    });
+
+    console.log(`Game dimulai di room ${roomId} dengan tim:`, teamA_Ids, "vs", teamB_Ids);
+    waitingPlayers = []; // Kosongkan antrean
 }
 
 io.on("connection", (socket) => {
-  console.log(`Pemain terhubung: ${socket.id}`);
+    console.log(`Pemain terhubung: ${socket.id}`);
 
-  socket.on("findMatch", () => {
-    if (waitingPlayer) {
-      clearTimeout(waitingPlayer.timer); // Batalkan timer bot
-      const player1 = waitingPlayer.socket;
-      const player2 = socket;
-      const roomId = `game_${player1.id}_${player2.id}`;
-      player1.join(roomId);
-      player2.join(roomId);
+    socket.on("findMatch", () => {
+        if (waitingPlayers.some(p => p.id === socket.id)) return; // Sudah di antrean
+        
+        console.log(`Pemain ${socket.id} masuk antrean.`);
+        waitingPlayers.push({ id: socket.id, socket });
+        socket.emit("statusUpdate", { status: 'waiting' });
 
-      games[roomId] = {
-        roomId: roomId,
-        isBotGame: false,
-        players: {
-          [player1.id]: {
-            isPlayer1: true,
-            paddleX: 200,
-            paddleY: 700,
-            paddleVX: 0,
-            paddleVY: 0,
-          },
-          [player2.id]: {
-            isPlayer1: false,
-            paddleX: 200,
-            paddleY: 100,
-            paddleVX: 0,
-            paddleVY: 0,
-          },
-        },
-        puck: { x: 200, y: 400, vx: 0, vy: 0, isFrozen: true }, // Mulai dengan bola beku
-        score: { [player1.id]: 0, [player2.id]: 0 },
-        countdown: COUNTDOWN_SECONDS,
-      };
+        if (waitingPlayers.length >= 4) {
+            tryStartGame();
+        } else {
+            startMatchmakingTimer();
+        }
+    });
 
-      io.to(roomId).emit("matchFound", games[roomId]);
-      waitingPlayer = null;
-    } else {
-      startBotMatchTimer(socket);
-      socket.emit("waitingForMatch");
-    }
-  });
+    socket.on("playerMove", ({ roomId, vx, vy }) => {
+        const game = games[roomId];
+        if (!game || !game.players[socket.id]) return;
+        const player = game.players[socket.id];
+        player.vx = vx;
+        player.vy = vy;
+    });
 
-  socket.on(
-    "playerMove",
-    ({ roomId, paddleX, paddleY, paddleVX, paddleVY }) => {
-      const game = games[roomId];
-      if (game && game.players[socket.id]) {
-        game.players[socket.id].paddleX = paddleX;
-        game.players[socket.id].paddleY = paddleY;
-        game.players[socket.id].paddleVX = paddleVX;
-        game.players[socket.id].paddleVY = paddleVY;
-      }
-    }
-  );
+    socket.on("playerAction", ({ roomId, action, charge }) => {
+       const game = games[roomId];
+       if (!game || !game.players[socket.id]) return;
+       const player = game.players[socket.id];
 
-  socket.on("disconnecting", () => {
-    for (const roomId of socket.rooms) {
-      if (roomId !== socket.id && games[roomId]) {
-        socket.to(roomId).emit("opponentLeft");
-        delete games[roomId];
-      }
-    }
-    if (waitingPlayer && waitingPlayer.socket.id === socket.id) {
-      clearTimeout(waitingPlayer.timer);
-      waitingPlayer = null;
-    }
-  });
-  socket.on("disconnect", () => console.log(`Pemain terputus: ${socket.id}`));
+       if (action === 'slide' && !player.isSliding) {
+           player.isSliding = true;
+           player.slideTimer = SLIDE_DURATION;
+       } else if (action === 'shoot' && game.ball.possessedBy === socket.id) {
+           const { ball } = game;
+           ball.possessedBy = null;
+           const shootStrength = 150 + (charge * 1000); // charge (0-1) -> strength
+           
+           // Arah tendangan adalah arah gerak pemain, atau ke depan jika diam
+           let shootDirX = player.vx;
+           let shootDirY = player.vy;
+           
+           if (shootDirX === 0 && shootDirY === 0) {
+               const playerTeam = player.team;
+               shootDirY = playerTeam === 'teamA' ? -1 : 1; // Team A menendang ke atas, B ke bawah
+           }
+
+           const magnitude = Math.sqrt(shootDirX**2 + shootDirY**2) || 1;
+           ball.vx = (shootDirX / magnitude) * shootStrength;
+           ball.vy = (shootDirY / magnitude) * shootStrength;
+       }
+    });
+
+    socket.on("disconnecting", () => {
+        waitingPlayers = waitingPlayers.filter(p => p.id !== socket.id);
+        if (waitingPlayers.length < 2) stopMatchmakingTimer();
+
+        for (const roomId of socket.rooms) {
+            if (roomId !== socket.id && games[roomId]) {
+                io.to(roomId).emit("opponentLeft", { playerId: socket.id });
+                // Bisa diganti dengan bot jika diinginkan
+                delete games[roomId]; // Untuk simple, akhiri game
+            }
+        }
+    });
 });
 
-const TICK_RATE = 60;
-const MS_PER_TICK = 1000 / TICK_RATE;
+// --- GAME LOOP ---
+function gameLoop() {
+    const now = Date.now();
+    for (const roomId in games) {
+        const game = games[roomId];
+        const dt = (now - game.lastUpdate) / 1000; // Delta time in seconds
 
-setInterval(() => {
-  for (const roomId in games) {
-    const game = games[roomId];
-    const dt = MS_PER_TICK / 1000;
+        // Update semua pemain
+        for (const playerId in game.players) {
+            updatePlayer(game.players[playerId], game, dt);
+        }
 
-    if (game.isBotGame) {
-      updateBotPaddle(game, dt);
+        // Update bola
+        updateBall(game.ball, game, dt);
+
+        game.lastUpdate = now;
+        io.to(roomId).emit("gameStateUpdate", game);
     }
+}
 
-    if (game.puck.isFrozen) {
-      // Logika countdown
-      if (!game.puck.countdownStarted) {
-        game.puck.countdownStarted = true;
-        let count = game.countdown;
-        const countdownInterval = setInterval(() => {
-          if (games[roomId]) {
-            // Pastikan game masih ada
-            games[roomId].countdown = count;
-            if (count > 0) {
-              count--;
-            } else {
-              // Countdown selesai, mulai permainan
-              games[roomId].puck.isFrozen = false;
-              games[roomId].puck.countdownStarted = false;
-              const scorerIsPlayer1 = game.lastScorer
-                ? games[roomId].players[game.lastScorer].isPlayer1
-                : Math.random() > 0.5;
-              games[roomId].puck.vx = Math.random() > 0.5 ? 150 : -150;
-              games[roomId].puck.vy = scorerIsPlayer1 ? -150 : 150;
-              delete games[roomId].countdown;
-              clearInterval(countdownInterval);
-            }
-          } else {
-            clearInterval(countdownInterval);
-          }
-        }, 1000);
-      }
+function updatePlayer(player, game, dt) {
+    if (player.isSliding) {
+        player.slideTimer -= dt * 1000;
+        if (player.slideTimer <= 0) {
+            player.isSliding = false;
+        }
+    }
+    
+    const speed = player.isSliding ? SLIDE_SPEED : MAX_PLAYER_SPEED;
+    player.x += player.vx * speed * dt;
+    player.y += player.vy * speed * dt;
+
+    // Batasi pergerakan di dalam arena
+    player.x = Math.max(PLAYER_RADIUS, Math.min(ARENA_WIDTH - PLAYER_RADIUS, player.x));
+    player.y = Math.max(PLAYER_RADIUS, Math.min(ARENA_HEIGHT - PLAYER_RADIUS, player.y));
+}
+
+function updateBall(ball, game, dt) {
+    if (ball.possessedBy) {
+        const owner = game.players[ball.possessedBy];
+        const team = owner.team;
+        // Posisi bola di depan pemain
+        const forwardY = team === 'teamA' ? -1 : 1;
+        ball.x = owner.x;
+        ball.y = owner.y + (forwardY * (PLAYER_RADIUS + 5));
+        ball.vx = 0;
+        ball.vy = 0;
     } else {
-      // Fisika normal
-      updateGameState(game, dt);
+        // Fisika bola bebas
+        ball.x += ball.vx * dt;
+        ball.y += ball.vy * dt;
+        ball.vx *= 0.98; // Gesekan
+        ball.vy *= 0.98;
+
+        // Cek tabrakan bola dengan dinding
+        if (ball.x <= BALL_RADIUS || ball.x >= ARENA_WIDTH - BALL_RADIUS) ball.vx *= -0.9;
+        if (ball.y <= BALL_RADIUS || ball.y >= ARENA_HEIGHT - BALL_RADIUS) ball.vy *= -0.9;
+        
+        // Cek tabrakan bola dengan pemain
+        for (const playerId in game.players) {
+            const player = game.players[playerId];
+            const dx = ball.x - player.x;
+            const dy = ball.y - player.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+
+            if (dist < PLAYER_RADIUS + BALL_RADIUS) {
+                if (player.isSliding) {
+                    // Merebut bola dengan slide
+                    ball.possessedBy = playerId;
+                } else {
+                    // Menguasai bola
+                    ball.possessedBy = playerId;
+                }
+            }
+        }
     }
+    
+    // Cek Goal
+    const goalLineTop = 20;
+    const goalLineBottom = ARENA_HEIGHT - 20;
+    const goalLeftX = ARENA_WIDTH * 0.25;
+    const goalRightX = ARENA_WIDTH * 0.75;
 
-    io.to(roomId).emit("gameStateUpdate", game);
-  }
-}, MS_PER_TICK);
-
-function updateBotPaddle(game, dt) {
-  const { puck, players } = game;
-  const botId = Object.keys(players).find((id) => players[id].isBot);
-  const bot = players[botId];
-
-  // AI Sederhana tapi Cukup Sulit
-  // Target X bot adalah posisi X puck, tapi ada sedikit error/delay
-  let targetX = puck.x;
-
-  // Prediksi di mana puck akan berada
-  if (puck.vy < 0) {
-    // Puck bergerak ke arah bot
-    const timeToReach = Math.abs((bot.paddleY - puck.y) / puck.vy);
-    targetX = puck.x + puck.vx * timeToReach;
-  }
-
-  // Batasi target agar tidak keluar arena
-  targetX = Math.max(
-    PADDLE_RADIUS,
-    Math.min(ARENA_WIDTH - PADDLE_RADIUS, targetX)
-  );
-
-  // Gerakkan paddle bot menuju target dengan kecepatan tertentu
-  const speed = 250; // Kecepatan gerak bot
-  const dx = targetX - bot.paddleX;
-  if (Math.abs(dx) > 1) {
-    bot.paddleX += Math.sign(dx) * speed * dt;
-  }
-}
-
-function handleGoalScoring(game) {
-  const { puck, players, score } = game;
-  // ... (kode deteksi gawang sama persis seperti sebelumnya) ...
-  const goalTopY = 10,
-    goalBottomY = ARENA_HEIGHT - 10,
-    goalLeftX = ARENA_WIDTH * 0.25,
-    goalRightX = ARENA_WIDTH * 0.75;
-  let scorerId = null;
-  if (puck.y < goalTopY && puck.x > goalLeftX && puck.x < goalRightX)
-    scorerId = Object.keys(players).find((id) => players[id].isPlayer1);
-  else if (puck.y > goalBottomY && puck.x > goalLeftX && puck.x < goalRightX)
-    scorerId = Object.keys(players).find((id) => !players[id].isPlayer1);
-
-  if (scorerId) {
-    score[scorerId]++;
-    game.lastScorer = scorerId;
-
-    // Cek Pemenang
-    if (score[scorerId] >= WINNING_SCORE) {
-      io.to(game.roomId).emit("gameOver", { winnerId: scorerId, score: score });
-      delete games[game.roomId]; // Hapus game setelah selesai
-      return;
+    let scorerTeam = null;
+    if (ball.y < goalLineTop && ball.x > goalLeftX && ball.x < goalRightX) {
+        scorerTeam = 'teamB'; // Team B mencetak gol di gawang atas
+    } else if (ball.y > goalLineBottom && ball.x > goalLeftX && ball.x < goalRightX) {
+        scorerTeam = 'teamA'; // Team A mencetak gol di gawang bawah
     }
-
-    // --- ATUR ULANG PUCKK BARU ---
-    const loserIsPlayer1 = !players[scorerId].isPlayer1;
-    puck.isFrozen = true;
-    puck.x = ARENA_WIDTH / 2;
-    // Posisikan puck lebih dekat ke arah yang kalah
-    puck.y = loserIsPlayer1 ? ARENA_HEIGHT / 2 + 100 : ARENA_HEIGHT / 2 - 100;
-    puck.vx = 0;
-    puck.vy = 0;
-    game.countdown = COUNTDOWN_SECONDS; // Mulai lagi countdown
-  }
-}
-
-// Fungsi updateGameState, handleWallCollisions, handlePaddleCollisions sama seperti sebelumnya
-function updateGameState(game, dt) {
-  const { puck, players } = game;
-  puck.vx *= AIR_FRICTION;
-  puck.vy *= AIR_FRICTION;
-  puck.x += puck.vx * dt;
-  puck.y += puck.vy * dt;
-  handleWallCollisions(puck);
-  handlePaddleCollisions(puck, players);
-
-  const speed = Math.sqrt(puck.vx * puck.vx + puck.vy * puck.vy);
-  if (speed > MAX_SPEED) {
-    puck.vx = (puck.vx / speed) * MAX_SPEED;
-    puck.vy = (puck.vy / speed) * MAX_SPEED;
-  }
-
-  handleGoalScoring(game);
-}
-
-function handleWallCollisions(puck) {
-  const goalLeftX = ARENA_WIDTH * 0.25;
-  const goalRightX = ARENA_WIDTH * 0.75;
-  if (puck.x - PUCK_RADIUS <= 0 || puck.x + PUCK_RADIUS >= ARENA_WIDTH) {
-    puck.vx *= -WALL_ENERGY_TRANSFER;
-    puck.x =
-      puck.x - PUCK_RADIUS <= 0 ? PUCK_RADIUS : ARENA_WIDTH - PUCK_RADIUS;
-  }
-  if (
-    (puck.y - PUCK_RADIUS <= 0 &&
-      (puck.x < goalLeftX || puck.x > goalRightX)) ||
-    (puck.y + PUCK_RADIUS >= ARENA_HEIGHT &&
-      (puck.x < goalLeftX || puck.x > goalRightX))
-  ) {
-    puck.vy *= -WALL_ENERGY_TRANSFER;
-    puck.y =
-      puck.y - PUCK_RADIUS <= 0 ? PUCK_RADIUS : ARENA_HEIGHT - PUCK_RADIUS;
-  }
-}
-
-function handlePaddleCollisions(puck, players) {
-  for (const playerId in players) {
-    const player = players[playerId];
-    const dx = puck.x - player.paddleX;
-    const dy = puck.y - player.paddleY;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    const minDistance = PUCK_RADIUS + PADDLE_RADIUS;
-
-    if (distance < minDistance) {
-      const normalX = dx / distance;
-      const normalY = dy / distance;
-
-      const relativeVelX = puck.vx - (player.paddleVX || 0);
-      const relativeVelY = puck.vy - (player.paddleVY || 0);
-      const speedAlongNormal = relativeVelX * normalX + relativeVelY * normalY;
-
-      if (speedAlongNormal < 0) {
-        const impulse = -2 * speedAlongNormal;
-        puck.vx += impulse * normalX * PADDLE_ENERGY_TRANSFER;
-        puck.vy += impulse * normalY * PADDLE_ENERGY_TRANSFER;
-      }
-
-      puck.x = player.paddleX + normalX * minDistance;
-      puck.y = player.paddleY + normalY * minDistance;
+    
+    if (scorerTeam) {
+        game.teams[scorerTeam].score++;
+        console.log(`GOAL! for ${scorerTeam}. Skor: A=${game.teams.teamA.score}, B=${game.teams.teamB.score}`);
+        // Reset posisi bola
+        ball.x = ARENA_WIDTH / 2;
+        ball.y = ARENA_HEIGHT / 2;
+        ball.vx = 0;
+        ball.vy = 0;
+        ball.possessedBy = null;
     }
-  }
 }
 
-server.listen(PORT, () =>
-  console.log(`Dedicated server berjalan di port ${PORT}`)
-);
+setInterval(gameLoop, 1000 / 60); // 60 FPS
+server.listen(PORT, () => console.log(`Server sepak bola berjalan di port ${PORT}`));
