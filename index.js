@@ -17,8 +17,8 @@ const games = {};
 let matchmakingTimer = null;
 
 // --- KONSTANTA GAME SEPAK BOLA (Disesuaikan untuk 1v1) ---
-const ARENA_WIDTH = 600;   // PERUBAHAN: Dibuat lebih sempit agar pas untuk 1v1
-const ARENA_HEIGHT = 1000;  // PERUBAHAN: Dibuat sedikit lebih pendek
+const ARENA_WIDTH = 1000;   // PERUBAHAN: Dibuat lebih sempit agar pas untuk 1v1
+const ARENA_HEIGHT = 600;  // PERUBAHAN: Dibuat sedikit lebih pendek
 const BALL_RADIUS = 20;
 const PLAYER_RADIUS = 30;
 const MAX_PLAYER_SPEED = 250;
