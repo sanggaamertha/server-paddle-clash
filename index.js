@@ -58,7 +58,7 @@ function tryStartGame() {
     // Acak pemain untuk membuat tim
     waitingPlayers.sort(() => Math.random() - 0.5);
 
-    const playerSockets = waitingPlayers.map(p => p.socket).filter(Boolean); // Hanya socket pemain manusia
+    const playerSockets = waitingPlayers.map(p => p.socket).filter(Boolean);
 
     const teamA_Ids = [waitingPlayers[0].id, waitingPlayers[1].id];
     const teamB_Ids = [waitingPlayers[2].id, waitingPlayers[3].id];
@@ -97,21 +97,20 @@ function tryStartGame() {
 
     games[roomId] = gameState;
     
-    // Beri tahu semua pemain manusia bahwa match ditemukan
     playerSockets.forEach(socket => {
         socket.join(roomId);
         io.to(socket.id).emit("matchFound", { ...gameState, myId: socket.id });
     });
 
     console.log(`Game dimulai di room ${roomId} dengan tim:`, teamA_Ids, "vs", teamB_Ids);
-    waitingPlayers = []; // Kosongkan antrean
+    waitingPlayers = [];
 }
 
 io.on("connection", (socket) => {
     console.log(`Pemain terhubung: ${socket.id}`);
 
     socket.on("findMatch", () => {
-        if (waitingPlayers.some(p => p.id === socket.id)) return; // Sudah di antrean
+        if (waitingPlayers.some(p => p.id === socket.id)) return;
         
         console.log(`Pemain ${socket.id} masuk antrean.`);
         waitingPlayers.push({ id: socket.id, socket });
@@ -140,18 +139,18 @@ io.on("connection", (socket) => {
        if (action === 'slide' && !player.isSliding) {
            player.isSliding = true;
            player.slideTimer = SLIDE_DURATION;
+           // Logika kecepatan slide ditangani di updatePlayer
        } else if (action === 'shoot' && game.ball.possessedBy === socket.id) {
            const { ball } = game;
            ball.possessedBy = null;
-           const shootStrength = 150 + (charge * 1000); // charge (0-1) -> strength
+           const shootStrength = 150 + (charge * 1000);
            
-           // Arah tendangan adalah arah gerak pemain, atau ke depan jika diam
            let shootDirX = player.vx;
            let shootDirY = player.vy;
            
            if (shootDirX === 0 && shootDirY === 0) {
                const playerTeam = player.team;
-               shootDirY = playerTeam === 'teamA' ? -1 : 1; // Team A menendang ke atas, B ke bawah
+               shootDirY = playerTeam === 'teamA' ? -1 : 1;
            }
 
            const magnitude = Math.sqrt(shootDirX**2 + shootDirY**2) || 1;
@@ -166,9 +165,8 @@ io.on("connection", (socket) => {
 
         for (const roomId of socket.rooms) {
             if (roomId !== socket.id && games[roomId]) {
-                io.to(roomId).emit("opponentLeft", { playerId: socket.id });
-                // Bisa diganti dengan bot jika diinginkan
-                delete games[roomId]; // Untuk simple, akhiri game
+                io.to(roomId).emit("statusUpdate", { status: 'opponentLeft', data: { playerId: socket.id } });
+                delete games[roomId];
             }
         }
     });
@@ -179,7 +177,7 @@ function gameLoop() {
     const now = Date.now();
     for (const roomId in games) {
         const game = games[roomId];
-        const dt = (now - game.lastUpdate) / 1000; // Delta time in seconds
+        const dt = (now - game.lastUpdate) / 1000;
 
         // Update semua pemain
         for (const playerId in game.players) {
@@ -206,7 +204,6 @@ function updatePlayer(player, game, dt) {
     player.x += player.vx * speed * dt;
     player.y += player.vy * speed * dt;
 
-    // Batasi pergerakan di dalam arena
     player.x = Math.max(PLAYER_RADIUS, Math.min(ARENA_WIDTH - PLAYER_RADIUS, player.x));
     player.y = Math.max(PLAYER_RADIUS, Math.min(ARENA_HEIGHT - PLAYER_RADIUS, player.y));
 }
@@ -214,25 +211,25 @@ function updatePlayer(player, game, dt) {
 function updateBall(ball, game, dt) {
     if (ball.possessedBy) {
         const owner = game.players[ball.possessedBy];
-        const team = owner.team;
-        // Posisi bola di depan pemain
-        const forwardY = team === 'teamA' ? -1 : 1;
-        ball.x = owner.x;
-        ball.y = owner.y + (forwardY * (PLAYER_RADIUS + 5));
-        ball.vx = 0;
-        ball.vy = 0;
+        if (owner) {
+            const team = owner.team;
+            const forwardY = team === 'teamA' ? -1 : 1;
+            ball.x = owner.x;
+            ball.y = owner.y + (forwardY * (PLAYER_RADIUS + 5));
+            ball.vx = 0;
+            ball.vy = 0;
+        } else {
+             ball.possessedBy = null; // Pemilik tidak ditemukan, lepaskan bola
+        }
     } else {
-        // Fisika bola bebas
         ball.x += ball.vx * dt;
         ball.y += ball.vy * dt;
-        ball.vx *= 0.98; // Gesekan
+        ball.vx *= 0.98;
         ball.vy *= 0.98;
 
-        // Cek tabrakan bola dengan dinding
         if (ball.x <= BALL_RADIUS || ball.x >= ARENA_WIDTH - BALL_RADIUS) ball.vx *= -0.9;
         if (ball.y <= BALL_RADIUS || ball.y >= ARENA_HEIGHT - BALL_RADIUS) ball.vy *= -0.9;
         
-        // Cek tabrakan bola dengan pemain
         for (const playerId in game.players) {
             const player = game.players[playerId];
             const dx = ball.x - player.x;
@@ -240,13 +237,13 @@ function updateBall(ball, game, dt) {
             const dist = Math.sqrt(dx*dx + dy*dy);
 
             if (dist < PLAYER_RADIUS + BALL_RADIUS) {
-                if (player.isSliding) {
-                    // Merebut bola dengan slide
-                    ball.possessedBy = playerId;
-                } else {
-                    // Menguasai bola
-                    ball.possessedBy = playerId;
-                }
+                 if (player.isSliding) {
+                     // Pemain yang slide langsung merebut bola
+                     ball.possessedBy = playerId;
+                 } else {
+                     // Hanya kuasai bola jika tidak ada yang punya
+                     ball.possessedBy = playerId;
+                 }
             }
         }
     }
@@ -259,15 +256,14 @@ function updateBall(ball, game, dt) {
 
     let scorerTeam = null;
     if (ball.y < goalLineTop && ball.x > goalLeftX && ball.x < goalRightX) {
-        scorerTeam = 'teamB'; // Team B mencetak gol di gawang atas
+        scorerTeam = 'teamB';
     } else if (ball.y > goalLineBottom && ball.x > goalLeftX && ball.x < goalRightX) {
-        scorerTeam = 'teamA'; // Team A mencetak gol di gawang bawah
+        scorerTeam = 'teamA';
     }
     
     if (scorerTeam) {
         game.teams[scorerTeam].score++;
-        console.log(`GOAL! for ${scorerTeam}. Skor: A=${game.teams.teamA.score}, B=${game.teams.teamB.score}`);
-        // Reset posisi bola
+        console.log(`GOAL! for ${scorerTeam}. Score: A=${game.teams.teamA.score}, B=${game.teams.teamB.score}`);
         ball.x = ARENA_WIDTH / 2;
         ball.y = ARENA_HEIGHT / 2;
         ball.vx = 0;
@@ -276,5 +272,5 @@ function updateBall(ball, game, dt) {
     }
 }
 
-setInterval(gameLoop, 1000 / 60); // 60 FPS
+setInterval(gameLoop, 1000 / 60);
 server.listen(PORT, () => console.log(`Server sepak bola berjalan di port ${PORT}`));
